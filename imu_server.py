@@ -120,10 +120,7 @@ def receive_imu():
             # CNN prediction
             # =================================================
 
-            probabilities = model.predict(
-                window_normalized,
-                verbose=0
-            )[0]
+            probabilities = model(window_normalized, training=False).numpy()[0]
 
             prediction = int(np.argmax(probabilities))
 
