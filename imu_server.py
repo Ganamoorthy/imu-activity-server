@@ -2,8 +2,10 @@ from flask import Flask, request, jsonify
 import numpy as np
 import tensorflow as tf
 import json
+from datetime import datetime, timezone
 
 app = Flask(__name__)
+
 
 # =================================================
 # Load CNN model
@@ -46,19 +48,35 @@ WINDOW_SIZE = 100
 
 
 # =================================================
-# Receive IMU data
+# Store latest prediction
+# =================================================
+
+latest_prediction = {
+    "status": "waiting",
+    "activity": "Waiting",
+    "confidence": 0.0,
+    "timestamp": None
+}
+
+
+# =================================================
+# Receive IMU data from ESP32
 # =================================================
 
 @app.route("/imu", methods=["POST"])
 def receive_imu():
 
     global samples
+    global latest_prediction
 
     try:
 
         data = request.get_json()
 
+        # -------------------------------------------------
         # Get IMU values
+        # -------------------------------------------------
+
         ax = float(data["ax"])
         ay = float(data["ay"])
         az = float(data["az"])
@@ -67,7 +85,11 @@ def receive_imu():
         gy = float(data["gy"])
         gz = float(data["gz"])
 
+
+        # -------------------------------------------------
         # Add sample
+        # -------------------------------------------------
+
         samples.append([
             ax,
             ay,
@@ -76,6 +98,11 @@ def receive_imu():
             gy,
             gz
         ])
+
+
+        # -------------------------------------------------
+        # Print received sample
+        # -------------------------------------------------
 
         print(
             f"Sample {len(samples)}/{WINDOW_SIZE} | "
@@ -87,13 +114,17 @@ def receive_imu():
             f"gz={gz:.0f}"
         )
 
+
         # =================================================
         # When 100 samples are collected
         # =================================================
 
         if len(samples) >= WINDOW_SIZE:
 
-            # Convert to NumPy
+            # -------------------------------------------------
+            # Convert samples to NumPy array
+            # -------------------------------------------------
+
             window = np.array(
                 samples[-WINDOW_SIZE:],
                 dtype=np.float32
@@ -102,11 +133,16 @@ def receive_imu():
             # Shape:
             # (100, 6)
 
+
+            # -------------------------------------------------
             # Add batch dimension
+            # -------------------------------------------------
+
             window = np.expand_dims(window, axis=0)
 
             # Shape:
             # (1, 100, 6)
+
 
             # =================================================
             # Normalize using training values
@@ -116,20 +152,60 @@ def receive_imu():
                 window - mean
             ) / (std + 1e-8)
 
+
             # =================================================
             # CNN prediction
             # =================================================
 
-            probabilities = model(window_normalized, training=False).numpy()[0]
+            probabilities = (
+                model(
+                    window_normalized,
+                    training=False
+                ).numpy()[0]
+            )
 
-            prediction = int(np.argmax(probabilities))
+            prediction = int(
+                np.argmax(probabilities)
+            )
 
             confidence = float(
                 probabilities[prediction] * 100
             )
 
+
+            # -------------------------------------------------
             # Get activity name
-            activity = activity_names[str(prediction)]
+            # -------------------------------------------------
+
+            activity = activity_names[
+                str(prediction)
+            ]
+
+
+            # =================================================
+            # Get current UTC timestamp
+            # =================================================
+
+            timestamp = datetime.now(
+                timezone.utc
+            ).isoformat()
+
+
+            # =================================================
+            # Update latest prediction
+            # =================================================
+
+            latest_prediction = {
+                "status": "prediction",
+                "activity": activity,
+                "confidence": round(confidence, 2),
+                "timestamp": timestamp
+            }
+
+
+            # =================================================
+            # Print prediction
+            # =================================================
 
             print()
             print("================================")
@@ -137,23 +213,40 @@ def receive_imu():
             print("================================")
             print(f"Activity   : {activity}")
             print(f"Confidence : {confidence:.2f}%")
+            print(f"Timestamp  : {timestamp}")
             print("================================")
             print()
 
-            # Clear samples
+
+            # -------------------------------------------------
+            # Clear samples for next window
+            # -------------------------------------------------
+
             samples.clear()
+
+
+            # -------------------------------------------------
+            # Send prediction response to ESP32
+            # -------------------------------------------------
 
             return jsonify({
                 "status": "prediction",
                 "activity": activity,
-                "confidence": round(confidence, 2)
+                "confidence": round(confidence, 2),
+                "timestamp": timestamp
             })
 
-        # Still collecting
+
+        # =================================================
+        # Still collecting samples
+        # =================================================
+
         return jsonify({
             "status": "collecting",
-            "samples": len(samples)
+            "samples": len(samples),
+            "window_size": WINDOW_SIZE
         })
+
 
     except Exception as e:
 
@@ -163,6 +256,40 @@ def receive_imu():
             "status": "error",
             "message": str(e)
         }), 400
+
+
+# =================================================
+# Latest activity API
+# Used by mobile application
+# =================================================
+
+@app.route("/latest", methods=["GET"])
+def latest():
+
+    response = latest_prediction.copy()
+
+    # Current number of samples
+    response["samples"] = len(samples)
+
+    # Total samples required for prediction
+    response["window_size"] = WINDOW_SIZE
+
+    return jsonify(response)
+
+
+# =================================================
+# Server health API
+# Used by mobile application
+# =================================================
+
+@app.route("/health", methods=["GET"])
+def health():
+
+    return jsonify({
+        "status": "online",
+        "model": "1D CNN",
+        "activities": 6
+    })
 
 
 # =================================================
